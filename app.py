@@ -102,7 +102,7 @@ def verify(source, name, result):
             raise ValueError('Client or financial-year header differs from source.')
         gstin = re.search(r'\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b', client.upper())
         gstin = gstin.group() if gstin else None
-        rows = []
+        rows, raw_totals = [], {}
         def amount(v):
             if type(v) not in (int, float) or not math.isfinite(v):
                 raise ValueError('Expected a calculated numeric amount; check formulas and source data.')
@@ -133,6 +133,7 @@ def verify(source, name, result):
             actual = amount(s[f'{dest}{total}'].value)
             if not equal(actual, expected):
                 raise ValueError(f'{label}: annual total mismatch.')
+            raw_totals[label] = (expected, actual)
             rows.append({'Metric': label, 'Source (sum of months)': display_amount(expected) if reported else 'Not reported',
                          'REECO total': display_amount(actual), 'Difference': display_amount(actual-expected) if reported else '—',
                          'Months reported': reported, 'REECO cell': f'{dest}{total}',
@@ -146,7 +147,7 @@ def verify(source, name, result):
             ('ITC Reclaimed',41,20,'BCDE',90)]:
             for i, tax in enumerate(TAX):
                 metric(f'{label} — {tax}', start, [col+i], dests[i], total)
-        return {'client': client, 'year': year, 'gstin': gstin, 'source': name, 'rows': rows}
+        return {'client': client, 'year': year, 'gstin': gstin, 'source': name, 'rows': rows, 'raw_totals': raw_totals}
     finally:
         book.close()
 
@@ -234,5 +235,18 @@ if __name__=='__main__':
                 st.text(f"GSTIN: {preview['gstin'] or 'Not detected'} | Financial year: {preview['year']}\nSource: {preview['source']}")
                 if not preview['gstin']:
                     st.warning('GSTIN could not be identified in the source header. Confirm the client manually.')
-                st.caption('REECO totals come from the exact workbook above. Source totals are calculated from comparable monthly values, not copied from the export’s printed grand-total row. Amounts are displayed to two decimals.')
-                st.dataframe(preview['rows'], hide_index=True)
+                summary = []
+                for label in ['Outward (NRC + Non-Taxable)', 'Outward liability',
+                              'Reverse-charge liability', 'ITC Eligible (NRC)', 'ITC Eligible (RC)']:
+                    group = [r for r in preview['rows'] if r['Metric'].split(' — ')[0] == label]
+                    reported = sum(r['Status'] == 'Match' for r in group)
+                    source_total, reeco_total = map(sum, zip(*(preview['raw_totals'][r['Metric']] for r in group)))
+                    source_total, reeco_total = (v.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) for v in (source_total, reeco_total))
+                    summary.append({'Metric': label, 'Source': f'{source_total:,.2f}' if reported else 'Not reported',
+                                    'REECO': f'{reeco_total:,.2f}',
+                                    'Status': 'No source amounts' if not reported else
+                                    ('Match · some tax heads blank' if reported < len(group) else 'Match')})
+                st.dataframe(summary, hide_index=True)
+                st.caption('Tax rows combine the four tax heads. Source totals use comparable monthly values; REECO totals use the downloaded workbook.')
+                with st.expander('View full verification by tax head and ITC category'):
+                    st.dataframe(preview['rows'], hide_index=True)
